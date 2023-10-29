@@ -1,0 +1,111 @@
+---
+- name: Install and Configure Kafka and ZooKeeper
+  hosts: Production
+  become: yes
+  become_method: sudo
+
+  vars:
+    desired_package_version_kafka: "3.6.*"
+
+    kafka_user_password: {{ user_password }}  # encrypted password
+
+  tasks:
+    - name: Create User for kafka
+      shell: |
+        mkdir -p /kafka/kafka_data
+        useradd kafka -m -s /bin/bash
+        echo "{{ user_password }}" | passwd --stdin kafka
+        usermod -aG kafka kafka
+        chown -R kafka:kafka /kafka
+        chmod 750 /kafka
+
+    - name: Check package version of Apache Kafka before installing
+      apt:
+        pkg:
+          - kafka={{ desired_package_version_kafka }}
+        state: present
+        update_cache: yes
+      register: package_result
+
+    - debug:
+        var: package_result
+
+    - name: Cancel job if desired package is not available
+      fail:
+        msg: "Desired package version {{ desired_package_version_kafka }} not available"
+      when: "package_result.failed == true"
+
+    - name: Change Kafka Config File
+      shell: |
+        cat > /opt/kafka/config/server.properties << EOF
+        broker.id={{ ansible_hostname | regex_replace('[^0-9]','') }}
+        listeners=PLAINTEXT://{{ ansible_host }}:9092
+        log.dirs=/kafka/kafka_data
+        zookeeper.connect={{ Zookeeper_machine_1 }}:2181,{{ Zookeeper_machine_2 }}:2181,{{ Zookeeper_machine_3 }}:2181
+        zookeeper.connection.timeout.ms=6000
+        num.partitions=3
+        default.replication.factor=3
+        offsets.topic.replication.factor=3
+        transaction.state.log.replication.factor=3
+        transaction.state.log.min.isr=2
+        log.retention.hours=168
+        log.segment.bytes=1073741824
+        log.retention.check.interval.ms=300000
+        log.cleaner.enable=true
+        log.cleaner.delete.retention.ms=86400000
+        auto.create.topics.enable=false
+        min.insync.replicas=2
+        unclean.leader.election.enable=false
+        delete.topic.enable=true
+        controlled.shutdown.enable=true
+        controlled.shutdown.max.retries=3
+        controlled.shutdown.retry.backoff.ms=5000
+        EOF
+
+    - name: Start Kafka Server
+      shell: /opt/kafka/bin/kafka-server-start.sh /opt/kafka/config/server.properties
+
+- name: Installing Zookeeper
+  hosts: Production[3:5]
+  order: sorted
+  serial: 1
+  become: yes
+  become_method: sudo
+
+   vars:
+    desired_package_version_zookeeper: "3.9.1"
+
+    - name: Create User for zookeeper
+      shell: |
+        mkdir -p /zookeeper
+        useradd zookeeper -m -s /bin/bash
+        echo "{{ user_password }}" | passwd --stdin zookeeper
+        usermod -aG zookeeper zookeeper
+        chown -R zookeeper:zookeeper /zookeeper
+        chmod 750 /zookeeper
+
+    - name: Creating and Changing Ownership for log path of ZooKeeper
+      shell: |
+        cd /zookeeper
+        wget https://downloads.apache.org/zookeeper/zookeeper-{{ desired_package_version_zookeeper }}/apache-zookeeper-{{ desired_package_version_zookeeper }}-bin.tar.gz
+        tar -xzf apache-zookeeper-{{ desired_package_version_zookeeper }}-bin.tar.gz -C /zookeeper
+
+    - name: Creating myid File for ZooKeeper
+      shell: echo "{{ ansible_hostname | regex_replace('[^0-9]','') }}" > /zookeeper/myid
+
+    - name: Change ZooKeeper Config File
+      shell: |
+        cat > /zookeeper/conf/zoo.cfg << EOF
+        tickTime=2000
+        dataDir=/zookeeper
+        clientPort=2181
+        initLimit=5
+        syncLimit=2
+        server.1={{ Zookeeper_machine_1 }}:2888:3888
+        server.2={{ Zookeeper_machine_2 }}:2888:3888
+        server.3={{ Zookeeper_machine_3 }}:2888:3888
+        EOF
+
+    - name: Start Zookeeper Server
+      shell: /zookeeper/bin/zkServer.sh start
+
